@@ -1,0 +1,690 @@
+---
+title: "Bayesian Statistics"
+subtitle: "Homework 3"
+author: "Leonardo Stincone"
+date: "28th May 2019"
+output:
+  html_document:
+    toc: true
+editor_options: 
+  chunk_output_type: console
+---
+
+\newcommand*\diff{\mathop{}\mathrm{d}}
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, fig.align='center')
+```
+
+```{r, libraries, message = F}
+# Libraries
+library(MASS)
+library(tidyverse)
+library(bayesplot)
+library(rstan)
+library(rstanarm)
+library(foreign)    # For the function read.dta()
+library(knitr)
+library(latex2exp)
+library(kableExtra) # For kable style table
+
+# Set plot themes
+theme_set(theme_bw())
+rstan_options(auto_write=TRUE)
+```
+
+# TH-1
+
+_**Assignment**: Probit model - Start from the logistic model on slide 20 `1992polls.stan` and write the probit specification of the model using the `target+=` syntax in the model block and the `bernoulli_lpmf` function (for any doubt, see the Stan manual documentation in the Stan website). Simulate 1000 draws using the `1992polls` data and compare the results with the ones obtained using the `rstanarm::stan_glm` function._
+
+
+## Models estimations
+
+Let's read and clean the data:
+
+```{r, cache = T}
+# Reading and cleaning data
+
+brdata <- read.dta("data/nes5200_processed_voters_realideo.dta",convert.factors=F)
+
+data_tbb <- brdata %>%
+  as_tibble() %>% 
+  filter(!is.na(black), !is.na(female), !is.na(educ1),
+         !is.na(age), !is.na(income), !is.na(state)) %>% 
+  filter(year %in% 1952:2000) 
+
+polls_tbb <- data_tbb %>% 
+  filter(year == 1992, presvote < 3) %>% 
+  mutate(vote = presvote - 1) %>% 
+  select(income, vote)
+
+polls_tbb
+```
+
+In the following 2 chunks the `Stan` models specifications are reported:
+
+
+#### Logit model
+
+```
+data{
+  int N;         // number of voters
+  int vote[N];   // vote: 0 (Clinton), 1 (Bush)
+  int income[N]; // 1-5 income scale
+}
+parameters{
+  real alpha;    // intercept
+  real beta;     // income coefficient
+}
+model{
+  for (n in 1:N){
+     // vote[n] ~ bernoulli_logit(alpha + income[n] * beta);
+     // target += bernoulli_lpmf(vote[n] | inv_logit(alpha + income[n] * beta));
+     target += bernoulli_logit_lpmf(vote[n] | alpha + income[n] * beta);
+  }
+  
+  alpha ~ normal(0, 10); // intercept weakly-inf prior
+  beta ~ normal(0, 2.5); // income weakly-inf prior
+}
+```
+
+
+#### Probit model
+
+```
+data{
+  int N;         // number of voters
+  int vote[N];   // vote: 0 (Clinton), 1 (Bush)
+  int income[N]; // 1-5 income scale
+}
+parameters{
+  real alpha;    // intercept
+  real beta;     // income coefficient
+}
+model{
+  for (n in 1:N){
+    // vote[n] ~ bernoulli(Phi(alpha + income[n] * beta)); // likelihood
+    target += bernoulli_lpmf(vote[n] | Phi(alpha + income[n] * beta));
+  }
+  alpha ~ normal(0, 10); // intercept weakly-inf prior
+  beta ~ normal(0, 2.5); // income weakly-inf prior
+}
+```
+
+In the following chunk the R implementation of the models is reported.
+
+```{r, models_compute, results = 'hide', cache = T}
+# Classical logit model
+
+fit_glm_logit <- glm(data = polls_tbb,
+            formula = vote ~ income,
+            family = binomial(link="logit"))
+
+
+# Bayesian logit model with stan
+
+polls_data <- list(N = nrow(polls_tbb),
+                   vote = polls_tbb$vote,
+                   income = polls_tbb$income)
+
+mod_stan_logit <- stan_model('stanModels/1992polls_logit.stan')
+
+fit_stan_logit <- sampling(mod_stan_logit,
+                           data = polls_data,
+                           iter = 1000)
+
+fit_stan_logit_tbb <- as_tibble(as.matrix(fit_stan_logit))
+
+
+# Bayesian logit model with rstans
+
+fit_stanarm_logit <- stan_glm(data = polls_tbb,
+                              vote ~ income,
+                              family = binomial(link="logit"),
+                              prior_intercept = normal(0,10),
+                              prior = normal(0, 2.5),
+                              iter = 1000)
+
+fit_stanarm_logit_tbb <- as_tibble(as.matrix(fit_stanarm_logit))
+
+
+# Classical probit model
+
+fit_glm_probit <- glm(data = polls_tbb,
+                     formula = vote ~ income,
+                     family = binomial(link="probit"))
+
+
+# Bayesian probit model with stan
+
+mod_stan_probit <- stan_model('stanModels/1992polls_probit.stan')
+
+fit_stan_probit <- sampling(mod_stan_probit,
+                            data = polls_data,
+                            iter = 1000)
+
+fit_stan_probit_tbb <- as_tibble(as.matrix(fit_stan_probit))
+
+
+# Bayesian probit model with rstanarm
+
+fit_stanarm_probit <- stan_glm(data = polls_tbb,
+                               vote ~ income,
+                               family = binomial(link="probit"),
+                               prior_intercept = normal(0,10),
+                               prior = normal(0, 2.5),
+                               iter = 1000)
+
+fit_stanarm_probit_tbb <- as_tibble(as.matrix(fit_stanarm_probit))
+```
+
+
+## Models comparison
+
+In the following chunk the coefficients estimated with the different models are shown:
+
+```{r, model_comparison, cache = T}
+# Model comparison
+
+results <- union(tibble(fit_glm_logit$coefficients) %>% 
+                   mutate(key = c("alpha", "beta")) %>% 
+                   spread(key = "key", value = "fit_glm_logit$coefficients") %>%
+                   mutate(method = "classical") %>% 
+                   union(fit_stan_logit_tbb %>% 
+                           summarize_at(1:2, mean) %>% 
+                           mutate(method = "stan")) %>%
+                   union(fit_stanarm_logit_tbb %>% 
+                           summarize_at(1:2, mean) %>% 
+                           rename(alpha = `(Intercept)`, beta = income) %>% 
+                           mutate(method = "stanarm")) %>% 
+                   mutate(link = "logit"),
+                 tibble(fit_glm_probit$coefficients) %>% 
+                   mutate(key = c("alpha", "beta")) %>% 
+                   spread(key = "key", value = "fit_glm_probit$coefficients") %>% 
+                   mutate(method = "classical") %>% 
+                   union(fit_stan_probit_tbb %>% 
+                           summarize_at(1:2, mean) %>% 
+                           mutate(method = "stan")) %>% 
+                   union(fit_stanarm_probit_tbb %>% 
+                           summarize_at(1:2, mean) %>% 
+                           rename(alpha = `(Intercept)`, beta = income) %>% 
+                           mutate(method = "stanarm")) %>% 
+                   mutate(link = "probit")) %>% 
+  select(method, link, alpha, beta)
+
+kable(results, digits = 3) %>% 
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"),
+                full_width = F)
+```
+
+As we can see from these results, the estimations for the parameters are almost the same using the classical estimator and the bayesian estimator. This is due to the fact that we are using weakly informative prior distributions.
+
+Comparing the logit and probit models' estimations, we can see that the logit estimations are more or less $1.6$ times the probit estimations. This is due to the fact that, in $0$, the derivative of the $\Phi(\cdot)$ function (the cumulative probability function for the standard normal distribution) is $\frac{4}{\sqrt{2\pi}}\approx`r round(4/sqrt(2*pi),3)`$ times the derivative of the $\text{logistic}(\cdot)$ function.
+
+This can be easily found out from the expressions of $\Phi(\cdot)$ and $\text{logit}(\cdot)$.
+Note that in the following expressions I used $\sigma$ to refer to the standard deviation of the normal distribution in a more general case. In the standard normal distribution $\sigma=1$.
+
+$$
+\begin{align}
+\Phi(x)
+&= \int_{-\infty}^{x}{\frac{1}{\sqrt{2\pi}\sigma}e^{-\frac{1}{2 \sigma^2}t^2}} \\
+\frac{\partial \Phi}{\partial x} (x_0)
+&= \frac{1}{\sqrt{2\pi}\sigma}e^{-\frac{1}{2 \sigma^2}{x_0}^2} \\
+\text{logistic}(x)
+&= \frac{e^x}{e^x+1} \\
+\frac{\partial \text{logistic}}{\partial x} (x_0)
+&= \frac{e^{x_0}}{\left(e^{x_0}+1\right)^2}
+\end{align}
+$$
+
+Thus:
+$$
+\begin{align}
+\frac{\partial \Phi}{\partial x} (0)
+&= \frac{1}{\sqrt{2\pi}\sigma} \\
+\frac{\partial \text{logistic}}{\partial x} (0)
+&= \frac{1}{4}
+\end{align}
+$$
+
+We can observe this relationship in the following plot. As we can see, the logistic function is quite similar to the cumulative probability function of a normal distribution $\mathcal{N}\left(\mu=0, \sigma = \frac{4}{\sqrt{2\pi}}\right)$.
+
+```{r, probit_logit, cache = T}
+sigma = 4/sqrt(2*pi)
+
+xlim = 5
+ylim = .4
+
+par(mfrow = c(2,2), mar = c(2.5, 4, 2, 2))
+
+curve(dnorm(x), col = "blue",
+      lwd = 2, xlim = c(-xlim, xlim), ylim = c(0, ylim),
+      xlab = "", ylab = "density")
+curve(exp(x)/((1+exp(x))^2), col = "red",
+      lwd = 2, add = T)
+
+curve(pnorm(x), col = "blue",
+      lwd = 2, xlim = c(-xlim, xlim),
+      xlab = "", ylab = "cumulative probability")
+curve(exp(x)/(1+exp(x)), col = "red",
+      lwd = 2, add = T)
+legend("topleft",
+       legend = c("Probit (0, 1)", "Logit"),
+       col = c("blue", "red"),
+       lwd = 2, bty = "n")
+
+
+curve(dnorm(x, sd = sigma), col = "blue",
+      lwd = 2, xlim = c(-xlim, xlim), ylim = c(0, ylim),
+      xlab = "", ylab = "density")
+curve(exp(x)/((1+exp(x))^2), col = "red",
+      lwd = 2, add = T)
+
+curve(pnorm(x, sd = sigma), col = "blue",
+      lwd = 2, xlim = c(-xlim, xlim),
+      xlab = "", ylab = "cumulative probability")
+curve(exp(x)/(1+exp(x)), col = "red",
+      lwd = 2, add = T)
+legend("topleft",
+       # legend = c(str_c("Probit (0, ",round(sigma,3),")"), "Logit"),
+       legend = c(TeX(str_c("Probit (0, $\\frac{4}{\\sqrt{2\\pi}}$ )")), "Logit"),
+       col = c("blue", "red"),
+       lwd = 2, bty = "n")
+```
+
+
+# LAB-1
+
+_**Assignment**: Using the most appropriate graphical tools of the `bayesplot` package, analyze the hierarchical negative binomial model fitted during the 5th lab session on the cockroaches dataset and comment the posterior estimates and the predictive check._
+
+## Model specification
+
+The model considered is the following:
+
+$$
+\begin{align}
+\text{complaints}_{i}
+&\sim \mathcal{NegBin}(\lambda_{i}, \ \phi), & i &\in\{1,\dots,n\}\\
+\lambda_{i}
+&= \exp{(\eta_{i})} \\
+\eta_{i}
+&= \mu_{b(i)} + \beta \, {\rm traps}_{i} + \text{log_sq_foot}_i \\
+\mu_b
+&\sim \mathcal{N}(\alpha + \texttt{building_data}_{b,\cdot} \, \boldsymbol{\zeta}, \ \sigma_{\mu}), & b &\in\{1,\dots,J\}
+\end{align}
+$$
+
+Where:
+
+- $n$ is the number of observations;
+- $i$ is the index of the observation;
+- $J$ is the number of buildings,
+- $b$ is the index of the building;
+- $b(\cdot):\{1,\dots,n\}\to \{1,\dots,J\}$ is the function that links every observation to the building in which it has been taken ($b(\cdot):i\mapsto b$);
+- $\texttt{building_data}_{b,\cdot}$ is the row vector of dimensions $(1\times K)$ of explanatory variables referred to the building $b$;
+- $\boldsymbol{\zeta}$ is the column vector of dimensions $(K\times 1)$ of coefficients of the building $b$;
+- $K$ is the number of explanatory variables referred to the buildings.
+
+The explanatory variables used at the building level are the following:
+
+- `live_in_super`
+- `age_of_building`
+- `average_tenant_age`
+- `monthly_average_rent`
+
+Note that the parametrization for the Negative Binomial used in `Stan` is the following:
+$$
+\begin{align}
+Y
+&\sim  \mathcal{NegBin}(\lambda, \ \phi) \\
+f_Y(y)
+&= {\phi+y-1 \choose y} \left(\frac{\phi}{\phi+\lambda}\right)^\phi \left(\frac{\lambda}{\phi+\lambda}\right)^y \\
+E[Y]
+&= \lambda \\
+Var(Y)
+&= \lambda + \lambda^2 \frac{1}{\phi}
+\end{align}
+$$
+
+Therefore,
+
+- $\lambda$ is the position parameter that represents $E[Y]$;
+- $\frac{1}{\phi}$ is the dispersion parameter that represents how much $Var[Y]$ is big given $E[Y]$.
+
+
+<!-- The parameters which we have to assign a prior distribution to are: -->
+The prior distributions assigned to the parameters are:
+$$
+\begin{align}
+\sigma_\mu
+&\sim \mathcal{N}^+\left(0, 1\right) \\
+\alpha
+&\sim \mathcal{N}\left(\ln(4), 1\right) \\
+\zeta_j
+&\sim \mathcal{N}\left(0, 1\right)
+& j\in\{1,\dots,K\}\\
+\beta
+&\sim \mathcal{N}\left(-\frac{1}{2}, 1\right) \\
+\frac{1}{\phi}
+&\sim \mathcal{N}^+\left(0, 1\right) \\
+\end{align}
+$$
+
+where $\mathcal{N}^+$ represents the truncated in 0 normal distribution.
+
+
+In order to avoid divergences in the Markov chain, the model has been reparametrized introducing a new variable $\mu_b^\text{raw}$ as follows:
+$$
+\begin{align}
+\text{complaints}_{i}
+&\sim \mathcal{NegBin}(\lambda_{i}, \ \phi), & i &\in\{1,\dots,n\}\\
+\lambda_{i}
+&= \exp{(\eta_{i})} \\
+\eta_{i}
+&= \mu_{b(i)} + \beta \, {\rm traps}_{i} + \text{log_sq_foot}_i \\
+\mu_b^\text{raw}
+&\sim \mathcal{N}(0, \ 1) & b &\in\{1,\dots,n_b\} \\
+\mu_b
+&= \alpha + \texttt{building_data}_{b,\cdot} \, \boldsymbol{\zeta} + \sigma_{\mu} \mu_b^\text{raw}
+\end{align}
+$$
+
+
+In the following chunk the `Stan` model specification is reported:
+
+```
+functions {
+  int neg_binomial_2_log_safe_rng(real eta, real phi) {
+    real gamma_rate = gamma_rng(phi, phi / exp(eta));
+    if (gamma_rate >= exp(20.79))
+      return -9;
+      
+    return poisson_rng(gamma_rate);
+  }
+}
+data {
+  int<lower=1> N;                        // Number of observations  
+  int<lower=0> complaints[N];            // Response variable
+  vector<lower=0>[N] traps;              // Upper-level explanatory variable
+  
+  // 'exposure'
+  vector[N] log_sq_foot;                 // Offset
+  
+  // building-level data
+  int<lower=1> K;                        // NUmber of lower-level explanatory variables
+  int<lower=1> J;                        // Number of buildings
+  int<lower=1, upper=J> building_idx[N]; // Link between observations and buildings
+  matrix[J,K] building_data;             // Lower-level explanatory variables
+}
+parameters {
+  real<lower=0> inv_phi;
+  real beta;               
+  real alpha;              
+  vector[K] zeta;       
+  vector[J] mu_raw;        
+  real<lower=0> sigma_mu;  
+}
+transformed parameters {
+  real phi = inv(inv_phi);
+  
+  // non-centered parameterization
+  vector[J] mu = alpha + building_data * zeta + sigma_mu * mu_raw;
+}
+model {
+  mu_raw ~ normal(0, 1);   
+  sigma_mu ~ normal(0, 1);
+  
+  alpha ~ normal(log(4), 1);
+  zeta ~ normal(0, 1);
+  beta ~ normal(-0.5, 1);
+  inv_phi ~ normal(0, 1);
+  
+  complaints ~ neg_binomial_2_log(
+    mu[building_idx] + beta * traps + log_sq_foot, 
+    phi
+  );
+} 
+generated quantities {
+  int y_rep[N];
+  for (n in 1:N) {
+    real eta_n = mu[building_idx[n]] + beta * traps[n] + log_sq_foot[n];
+    y_rep[n] = neg_binomial_2_log_safe_rng(eta_n, phi);
+  }
+}
+```
+
+
+```{r, pest_read, cache = T}
+pest_data <- readRDS('data/pest_data.RDS')
+
+N_buildings <- length(unique(pest_data$building_id))
+
+N_months <- length(unique(pest_data$date))
+
+# Add some IDs for building and month
+pest_data <- pest_data %>%
+  mutate(
+    building_fac = factor(building_id, levels = unique(building_id)),
+    building_idx = as.integer(building_fac),
+    ids = rep(1:N_months, N_buildings),
+    mo_idx = lubridate::month(date)
+  )
+
+# Center and rescale the building specific data
+building_data <- pest_data %>%
+  select(
+    building_idx,
+    live_in_super,
+    age_of_building,
+    total_sq_foot,
+    average_tenant_age,
+    monthly_average_rent
+  ) %>%
+  unique() %>%
+  arrange(building_idx) %>%
+  select(-building_idx) %>%
+  scale(scale=FALSE) %>%
+  as.data.frame() %>%
+  mutate( # scale by constants
+    age_of_building = age_of_building / 10,
+    total_sq_foot = total_sq_foot / 10000,
+    average_tenant_age = average_tenant_age / 10,
+    monthly_average_rent = monthly_average_rent / 1000
+  ) %>%
+  as.matrix()
+
+stan_dat_hier <-
+  with(pest_data,
+       list(complaints = complaints,
+            traps = traps,
+            N = length(traps),
+            J = N_buildings,
+            log_sq_foot = log(pest_data$total_sq_foot/1e4),
+            building_data = building_data[,-3],
+            mo_idx = as.integer(as.factor(date)),
+            K = 4,
+            building_idx = building_idx
+       )
+  )
+```
+
+
+```{r, pest_model, results = 'hide', cache = T}
+comp_model_NB_hier_ncp <- stan_model('stanModels/hier_NB_regression_ncp.stan')
+
+fitted_model_NB_hier_ncp <- sampling(comp_model_NB_hier_ncp, data = stan_dat_hier,
+                                     chains = 4, cores = 1)
+
+nbh_tbb <- as_tibble(as.matrix(fitted_model_NB_hier_ncp))
+```
+
+
+## Model checking
+
+### Overlay
+
+In the following plot it is shown:
+
+- in blue the kernel density approximation for the density function of the response variable `complaints`;
+- in light blue the kernel density approximation for the density function of the simulated response variable `complaints` for the first 200 simulations.
+
+As we can see the blue line fits the light blue ones, therefore we can accept that the `complaints` data is a sample from the theoretical distribution assumed in the model.
+
+```{r, overlay, cache = T}
+y_rep <- as.matrix(fitted_model_NB_hier_ncp, pars = "y_rep")
+ppc_dens_overlay(stan_dat_hier$complaints, y_rep[1:200,])
+```
+
+
+### Grouped statistics
+
+In the following 3 plots, for each building, there are shown:
+
+- in blue the value of a statistic $T$ for the response variable `complaints`;
+- in light blue the distribution of the statistic $T$ in the simulated response variable `complaints`.
+
+The statistics $T$ used are:
+
+- sample mean;
+- sample standard deviation;
+- absolute frequency of zeros.
+
+As we can see the blue notches fit the light blue histograms, therefore, for each statistic $T$ considered, we can accept that the $T$ statistic in the data is a sample from the theoretical distribution of $T$ assumed in the model.
+
+```{r, statistics_grouped, cache = T, fig.width = 10, fig.height = 5}
+ppc_stat_grouped(
+  y = stan_dat_hier$complaints,
+  yrep = y_rep,
+  group = pest_data$building_id,
+  stat = 'mean',
+  binwidth = 0.5,
+  facet_args = list(nrow = 2)
+)
+
+
+ppc_stat_grouped(
+  y = stan_dat_hier$complaints,
+  yrep = y_rep,
+  group = pest_data$building_id,
+  stat = 'sd',
+  binwidth = 0.5,
+  facet_args = list(nrow = 2)
+)
+
+
+n_zero = function(x){sum(x==0)}
+
+ppc_stat_grouped(
+  y = stan_dat_hier$complaints,
+  yrep = y_rep,
+  group = pest_data$building_id,
+  stat = n_zero,
+  binwidth = 0.5,
+  facet_args = list(nrow = 2)
+)
+```
+
+
+
+### Credibility intervals
+
+In the following plot there are reported for each observation:
+
+- in blue the observed value for the response variable `complaints`;
+- in light blue a credibility interval for the response variable `complaints` according to the model; the credibility levels used are 0.5 and 0.9.
+
+The observations are grouped by building.
+
+As we can see, almost every blue point is within the correspondent credibility interval, so there are no anomalous points.
+
+```{r, intervals_grouped, cache = T, fig.width = 10, fig.height = 5}
+ppc_intervals_grouped(
+  y = stan_dat_hier$complaints,
+  yrep = y_rep,
+  group = pest_data$building_id,
+  facet_args = list(nrow = 2))
+```
+
+The following plot is a scatterplot with `traps` on the x axis and `complaints` on the y axis. `traps` is the stronger predictor, indeed we can see a negative correlation between the two variables.
+
+The light blue points are the expected values for `complaints` for each observation according to the model; the light blue segments are credibility intervals at levels 0.5 and 0.9.
+
+In this visualization we loose the correspondence between the `complaints` in each observation and its credibility interval, but we gain a more synthetic visualization.
+
+The conclusions we get from this plot are the same that we get from the previous one.
+
+
+```{r, scatter, cache = T}
+ppc_intervals(
+  y = stan_dat_hier$complaints,
+  yrep = y_rep,
+  x = stan_dat_hier$traps
+) +
+  labs(x = "Number of traps", y = "Number of complaints")
+```
+
+
+### Residuals
+
+In the following plot there are reported:
+
+- on the horizontal axis the estimated values for `complaints`;
+- on the vertical axis the standardized residuals.
+
+The residuals are asymmetrical because `complaints` has values in $\mathbb{N}$, so it can't assume values lower than 0. Looking to the points that exceeds the band $[-2, 2]$ we can see that they are not too much. In the plot we don't see a specific pattern for the residuals.
+
+```{r, residuals, cache = T}
+mean_y_rep <- nbh_tbb %>% 
+  select(contains("y_rep")) %>% 
+  colMeans()
+
+mean_inv_phi <- mean(as.matrix(fitted_model_NB_hier_ncp, pars = "inv_phi"))
+std_resid <- (stan_dat_hier$complaints - mean_y_rep) / sqrt(mean_y_rep + mean_y_rep^2*mean_inv_phi)
+
+data_fit1 <- tibble(traps = pest_data$traps,
+                    y_obs = pest_data$complaints,
+                    mean_y_rep, std_resid)
+
+data_fit1 %>% 
+  ggplot(aes(x = mean_y_rep, y = std_resid)) +
+  geom_point(alpha = .5) +
+  geom_hline(yintercept = c(-2,2)) +
+  scale_y_continuous(limits = max(abs(std_resid))*c(-1,1))
+```
+
+
+
+
+## Model evaluation
+
+In the following plot, for each regression coefficients, there are represented the mean a posteriori estimation and the posterior credibility intervals at levels 0.95 and 0.99. As we can see, the intercept ($\alpha$) and the coefficient for `traps` ($\beta$) are significantly different from $0$, while the coefficients for the building's explanatory variables ($\zeta_1, \zeta_2, \zeta_3, \zeta_4$) are not significantly different from $0$.
+
+Therefore we could consider an easier model without that four explanatory variables.
+
+```{r, coeff_intervals, cache = T}
+coeff_intervals <- nbh_tbb %>% 
+  select(contains("zeta"), contains("alpha"), contains("beta")) %>% 
+  gather() %>% 
+  group_by(key) %>% 
+  summarize(q_01 = quantile(value, .01),
+            q_05 = quantile(value, .05),
+            mean = mean(value),
+            q_95 = quantile(value, .95),
+            q_99 = quantile(value, .99))
+
+ggplot(data = coeff_intervals,
+       aes(x = key)) +
+  geom_point(aes(y = mean), size = 2) +
+  # geom_segment(aes(y = q_01, yend = q_99, xend = key)) +
+  # geom_segment(aes(y = q_05, yend = q_95, xend = key), size = 1) +
+  geom_errorbar(aes(ymin = q_01, ymax = q_99), size = .5, width = .04) +
+  geom_errorbar(aes(ymin = q_05, ymax = q_95), size = 1, width = .1) +
+  geom_hline(yintercept = 0) +
+  labs(x = "Coefficient", y = "Posterior distribution estimation",
+       title = "Credibility intervals for the regression coefficients")
+
+kable(coeff_intervals, digits = 3) %>% 
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"),
+                full_width = F)
+```
+
