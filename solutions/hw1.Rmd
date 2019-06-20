@@ -13,7 +13,7 @@ editor_options:
 \newcommand*\diff{\mathop{}\mathrm{d}}
 
 ```{r setup, include=FALSE}
-knitr::opts_chunk$set(echo = TRUE, fig.align='center')
+knitr::opts_chunk$set(echo = TRUE, fig.align='center', cache = TRUE)
 ```
 
 ## TH-1
